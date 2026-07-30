@@ -10,6 +10,29 @@ from .roms import discover_roms, required_roms_ready
 
 
 HELP = "Enter play  / search  p profile  f fullscreen  c CRT  d doctor  q quit"
+MIN_HEIGHT = 8
+MIN_WIDTH = 32
+
+
+def _safe_addnstr(
+    stdscr: curses.window,
+    row: int,
+    column: int,
+    text: str,
+    limit: int,
+    attr: int = curses.A_NORMAL,
+) -> None:
+    height, width = stdscr.getmaxyx()
+    if row < 0 or row >= height or column < 0 or column >= width or limit <= 0:
+        return
+    safe_limit = min(limit, width - column)
+    if safe_limit <= 0:
+        return
+    try:
+        stdscr.addnstr(row, column, text, safe_limit, attr)
+    except curses.error:
+        # A resize can invalidate coordinates between getmaxyx() and addnstr().
+        pass
 
 
 class Tui:
@@ -60,14 +83,29 @@ class Tui:
     def draw(self, stdscr: curses.window) -> None:
         stdscr.erase()
         height, width = stdscr.getmaxyx()
+        if height < MIN_HEIGHT or width < MIN_WIDTH:
+            _safe_addnstr(stdscr, 0, 0, " C64 // TERMINAL TOO SMALL ", width, curses.A_REVERSE)
+            _safe_addnstr(
+                stdscr,
+                1,
+                0,
+                f"Resize to at least {MIN_WIDTH}x{MIN_HEIGHT}. Current: {width}x{height}",
+                max(0, width - 1),
+            )
+            try:
+                stdscr.refresh()
+            except curses.error:
+                pass
+            return
+
         title = " C64 // SIMPLE LINUX FRONT END "
-        stdscr.addnstr(0, 0, title.ljust(width), width, curses.A_REVERSE)
+        _safe_addnstr(stdscr, 0, 0, title.ljust(width), width, curses.A_REVERSE)
         status = (
             f"Profile:{self.config.profile}  Region:{self.config.region.upper()}  "
             f"Fullscreen:{'Y' if self.config.fullscreen else 'N'}  CRT:{'Y' if self.config.crt_filter else 'N'}"
         )
-        stdscr.addnstr(1, 0, status, width - 1)
-        stdscr.addnstr(2, 0, f"Library: {len(self.filtered)} image(s)", width - 1)
+        _safe_addnstr(stdscr, 1, 0, status, width - 1)
+        _safe_addnstr(stdscr, 2, 0, f"Library: {len(self.filtered)} image(s)", width - 1)
 
         list_top = 4
         list_height = max(1, height - 7)
@@ -77,28 +115,47 @@ class Tui:
             self.offset = self.index - list_height + 1
 
         if not self.filtered:
-            stdscr.addnstr(list_top, 2, "No games found. Run: c64 setup --library ~/Games/C64", width - 4)
+            _safe_addnstr(
+                stdscr,
+                list_top,
+                2,
+                "No games found. Run: c64 setup --library ~/Games/C64",
+                width - 4,
+            )
         else:
             for row, item in enumerate(self.filtered[self.offset : self.offset + list_height], start=list_top):
                 absolute = self.offset + (row - list_top)
                 marker = ">" if absolute == self.index else " "
                 line = f"{marker} [{item.kind:<3}] {item.title}  —  {item.path}"
                 attr = curses.A_BOLD if absolute == self.index else curses.A_NORMAL
-                stdscr.addnstr(row, 0, line, width - 1, attr)
+                _safe_addnstr(stdscr, row, 0, line, width - 1, attr)
 
         footer = self.message or HELP
-        stdscr.addnstr(height - 2, 0, footer.ljust(width), width, curses.A_REVERSE)
-        stdscr.addnstr(height - 1, 0, "QSOLKCB/C64 — no ROM scavenger hunt, no menu maze", width - 1)
-        stdscr.refresh()
+        _safe_addnstr(stdscr, height - 2, 0, footer.ljust(width), width, curses.A_REVERSE)
+        _safe_addnstr(stdscr, height - 1, 0, "QSOLKCB/C64 — no ROM scavenger hunt, no menu maze", width - 1)
+        try:
+            stdscr.refresh()
+        except curses.error:
+            pass
 
     def search(self, stdscr: curses.window) -> None:
         height, width = stdscr.getmaxyx()
+        if height < MIN_HEIGHT or width < MIN_WIDTH:
+            self.message = f"Resize to at least {MIN_WIDTH}x{MIN_HEIGHT} before searching"
+            return
+        query = ""
         curses.echo()
         curses.curs_set(1)
-        stdscr.addnstr(height - 2, 0, "Search: ".ljust(width), width, curses.A_REVERSE)
-        stdscr.move(height - 2, len("Search: "))
+        _safe_addnstr(stdscr, height - 2, 0, "Search: ".ljust(width), width, curses.A_REVERSE)
         try:
-            query = stdscr.getstr(height - 2, len("Search: "), max(1, width - 10)).decode("utf-8", "replace")
+            stdscr.move(height - 2, len("Search: "))
+            query = stdscr.getstr(
+                height - 2,
+                len("Search: "),
+                max(1, width - len("Search: ") - 1),
+            ).decode("utf-8", "replace")
+        except curses.error:
+            self.message = "Search cancelled after terminal resize"
         finally:
             curses.noecho()
             curses.curs_set(0)
@@ -109,7 +166,8 @@ class Tui:
             self.filtered = [item for item in self.items if q in item.title.casefold() or q in str(item.path).casefold()]
         self.index = 0
         self.offset = 0
-        self.message = f"Search results: {len(self.filtered)}"
+        if query:
+            self.message = f"Search results: {len(self.filtered)}"
 
     def doctor_message(self) -> None:
         engine = choose_engine(self.config)
