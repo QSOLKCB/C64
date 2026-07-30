@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from c64app.cli import main
+
+raise SystemExit(main())
