@@ -128,9 +128,19 @@ def _collect_source_files(source: Path) -> tuple[Path, list[Path]]:
         return source, [p for p in source.rglob("*") if p.is_file()]
     if source.is_file() and zipfile.is_zipfile(source):
         temp_dir = Path(tempfile.mkdtemp(prefix="qsol-c64-roms-"))
+        extracted: list[Path] = []
         with zipfile.ZipFile(source) as archive:
-            archive.extractall(temp_dir)
-        return temp_dir, [p for p in temp_dir.rglob("*") if p.is_file()]
+            for index, info in enumerate(archive.infolist()):
+                if info.is_dir():
+                    continue
+                basename = Path(info.filename).name
+                if not basename:
+                    continue
+                target = temp_dir / f"{index:04d}-{basename}"
+                with archive.open(info) as source_handle, target.open("wb") as target_handle:
+                    shutil.copyfileobj(source_handle, target_handle)
+                extracted.append(target)
+        return temp_dir, extracted
     raise ValueError(f"ROM source must be a directory or ZIP archive: {source}")
 
 
