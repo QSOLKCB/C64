@@ -1,4 +1,4 @@
-# C64
+# C64 Emulator
 
 **A C64 emulator experience for Linux that does not make you study emulator archaeology first.**
 
