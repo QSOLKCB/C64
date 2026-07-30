@@ -35,6 +35,10 @@ ROM_DEFINITIONS: tuple[RomDefinition, ...] = (
     ),
 )
 
+ROM_FILE_SIZES = frozenset(definition.size for definition in ROM_DEFINITIONS)
+ZIP_MAX_MEMBERS = 4096
+ZIP_MAX_EXTRACTED_BYTES = 8 * 1024 * 1024
+
 
 @dataclass(slots=True)
 class RomMatch:
@@ -129,18 +133,39 @@ def _collect_source_files(source: Path) -> tuple[Path, list[Path]]:
     if source.is_file() and zipfile.is_zipfile(source):
         temp_dir = Path(tempfile.mkdtemp(prefix="qsol-c64-roms-"))
         extracted: list[Path] = []
-        with zipfile.ZipFile(source) as archive:
-            for index, info in enumerate(archive.infolist()):
-                if info.is_dir():
-                    continue
-                basename = Path(info.filename).name
-                if not basename:
-                    continue
-                target = temp_dir / f"{index:04d}-{basename}"
-                with archive.open(info) as source_handle, target.open("wb") as target_handle:
-                    shutil.copyfileobj(source_handle, target_handle)
-                extracted.append(target)
-        return temp_dir, extracted
+        extracted_bytes = 0
+        try:
+            with zipfile.ZipFile(source) as archive:
+                infos = archive.infolist()
+                if len(infos) > ZIP_MAX_MEMBERS:
+                    raise ValueError(
+                        f"ROM ZIP contains too many members ({len(infos)}; maximum {ZIP_MAX_MEMBERS})"
+                    )
+                for index, info in enumerate(infos):
+                    if info.is_dir() or info.file_size not in ROM_FILE_SIZES:
+                        continue
+                    extracted_bytes += info.file_size
+                    if extracted_bytes > ZIP_MAX_EXTRACTED_BYTES:
+                        raise ValueError(
+                            "ROM ZIP exceeds the safe extraction limit "
+                            f"({ZIP_MAX_EXTRACTED_BYTES} bytes)"
+                        )
+                    basename = Path(info.filename).name
+                    if not basename:
+                        continue
+                    target_dir = temp_dir / f"{index:04d}"
+                    target_dir.mkdir()
+                    target = target_dir / basename
+                    with archive.open(info) as source_handle:
+                        payload = source_handle.read(info.file_size + 1)
+                    if len(payload) != info.file_size:
+                        raise ValueError(f"ROM ZIP member has an invalid size: {info.filename}")
+                    target.write_bytes(payload)
+                    extracted.append(target)
+            return temp_dir, extracted
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
     raise ValueError(f"ROM source must be a directory or ZIP archive: {source}")
 
 
@@ -178,7 +203,11 @@ def import_roms(source: Path, destination_root: Path | None = None) -> dict[str,
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / definition.canonical_name
             shutil.copyfile(selected, target)
-            copied[definition.key] = RomMatch(definition, target.resolve(), sha256_file(target))
+            try:
+                digest = sha256_file(target)
+            except OSError:
+                digest = None
+            copied[definition.key] = RomMatch(definition, target.resolve(), digest)
         return copied
     finally:
         if extraction_root != source and extraction_root.name.startswith("qsol-c64-roms-"):
