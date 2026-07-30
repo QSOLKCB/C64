@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
+from c64app.cli import _print_rom_status
 from c64app.config import Config, load_config, save_config
 from c64app.engine import Engine, build_command
 from c64app.library import scan_library
@@ -23,14 +26,72 @@ class ConfigTests(unittest.TestCase):
 
 
 class RomTests(unittest.TestCase):
+    def _write_rom_directory(self, root: Path) -> None:
+        for definition in ROM_DEFINITIONS:
+            (root / definition.aliases[0]).write_bytes(bytes(definition.size))
+
     def test_import_by_filename_and_size(self) -> None:
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as dest_tmp:
             source = Path(source_tmp)
-            for definition in ROM_DEFINITIONS:
-                (source / definition.aliases[0]).write_bytes(bytes(definition.size))
+            self._write_rom_directory(source)
             matches = import_roms(source, Path(dest_tmp))
             self.assertTrue(required_roms_ready(matches))
             self.assertTrue(matches["dos1541"].path and matches["dos1541"].path.exists())
+
+    def test_zip_import_strips_member_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "roms.zip"
+            destination = root / "destination"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                for definition in ROM_DEFINITIONS:
+                    archive.writestr(
+                        f"../../nested/{definition.aliases[0]}",
+                        bytes(definition.size),
+                    )
+                archive.writestr("../../outside.txt", b"not a ROM")
+
+            matches = import_roms(archive_path, destination)
+
+            self.assertTrue(required_roms_ready(matches))
+            self.assertEqual(matches["kernal"].path, (destination / "C64" / "kernal").resolve())
+            self.assertFalse((root / "outside.txt").exists())
+
+    def test_zip_import_enforces_extraction_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive_path = root / "roms.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("kernal", bytes(8192))
+
+            with patch("c64app.roms.ZIP_MAX_EXTRACTED_BYTES", 4096):
+                with self.assertRaisesRegex(ValueError, "safe extraction limit"):
+                    import_roms(archive_path, root / "destination")
+
+    def test_import_keeps_path_when_hash_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as dest_tmp:
+            source = Path(source_tmp)
+            self._write_rom_directory(source)
+            with patch("c64app.roms.sha256_file", side_effect=OSError("read failed")):
+                matches = import_roms(source, Path(dest_tmp))
+
+            self.assertTrue(required_roms_ready(matches))
+            self.assertIsNotNone(matches["kernal"].path)
+            self.assertIsNone(matches["kernal"].sha256)
+
+
+class CliTests(unittest.TestCase):
+    def test_rom_status_handles_missing_hash(self) -> None:
+        matches = {
+            definition.key: RomMatch(
+                definition,
+                Path("/roms") / definition.canonical_name,
+                None,
+            )
+            for definition in ROM_DEFINITIONS
+        }
+        with patch("c64app.cli.discover_roms", return_value=matches), patch("builtins.print"):
+            self.assertTrue(_print_rom_status(Config()))
 
 
 class LibraryTests(unittest.TestCase):
