@@ -54,7 +54,8 @@ def _print_rom_status(config: Config) -> bool:
         match = matches[definition.key]
         label = "required" if definition.required else "optional"
         if match.path:
-            print(f"  [ok]      {definition.key:<8} {match.path}  sha256:{match.sha256[:12]}")
+            digest = f"sha256:{match.sha256[:12]}" if match.sha256 else "sha256:unavailable"
+            print(f"  [ok]      {definition.key:<8} {match.path}  {digest}")
         else:
             print(f"  [missing] {definition.key:<8} ({label}, {definition.size} bytes)")
     return required_roms_ready(matches)
@@ -100,10 +101,15 @@ def cmd_setup(config: Config, args: argparse.Namespace) -> int:
                 config.library_paths.append(resolved)
     if args.rom_source:
         print(f"Importing ROMs from {args.rom_source} ...")
-        imported = import_roms(args.rom_source, config.resolved_rom_dir)
+        try:
+            imported = import_roms(args.rom_source, config.resolved_rom_dir)
+        except (OSError, ValueError) as exc:
+            print(f"c64: ROM import failed: {exc}", file=sys.stderr)
+            return 2
         for key, match in imported.items():
             if match.path:
-                print(f"  [ok] {key}: {match.path}")
+                digest = f" sha256:{match.sha256[:12]}" if match.sha256 else " sha256:unavailable"
+                print(f"  [ok] {key}: {match.path}{digest}")
             else:
                 print(f"  [not found] {key}")
     save_config(config)
